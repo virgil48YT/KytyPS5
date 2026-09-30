@@ -215,7 +215,7 @@ void EmitSetTessellationAttribute(ValueEmitContext& ctx, const IR::Inst& inst) {
 			if (!inst.Arg(1).IsImmediate()) {
 				TessellationFactorAccess(ctx, inst, [&](uint32_t ptr) {
 					ctx.state.builder.AddFunction(spv::OpStore, ptr, value);
-					return 0u;
+					return ConstantU32(ctx.state, 0);
 				});
 				return;
 			}
