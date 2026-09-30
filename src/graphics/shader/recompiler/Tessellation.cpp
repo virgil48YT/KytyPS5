@@ -79,6 +79,74 @@ uint32_t ReflectTessellationStride(const Decoder::Program& program, bool local,
 		           ? value
 		           : Address {};
 	};
+	const auto is_constant = [](Address value) {
+		return value.kind == Kind::Affine && value.coefficient == 0u;
+	};
+	// The frontend's packed HS ID is exactly InvocationId << 8, so bit
+	// operations may view it as affine.
+	const auto logical = [](Address value) {
+		return value.kind == Kind::PackedControlPoint ? Address {Kind::Affine, 256u, 0u} : value;
+	};
+	// Largest value over the control point range.
+	const auto maximum = [&](Address value) {
+		return uint64_t {value.coefficient} * (control_points - 1u) + value.constant;
+	};
+	const auto shift_left = [&](Address value, Address amount) {
+		return is_constant(amount) && amount.constant < 32u
+		           ? multiply(value, constant(1u << amount.constant))
+		           : Address {};
+	};
+	const auto shift_right = [&](Address value, Address amount) -> Address {
+		value = logical(value);
+		if (!is_constant(amount) || amount.constant >= 32u || value.kind != Kind::Affine) return {};
+		const uint32_t shift = amount.constant;
+		if (is_constant(value)) return constant(value.constant >> shift);
+		const uint32_t low = (1u << shift) - 1u;
+		return (value.coefficient & low) == 0u && (value.constant & low) == 0u &&
+		               maximum(value) <= UINT32_MAX
+		           ? affine(value.coefficient >> shift, value.constant >> shift)
+		           : Address {};
+	};
+	const auto bit_and = [&](Address lhs, Address rhs) -> Address {
+		lhs = logical(lhs);
+		rhs = logical(rhs);
+		if (is_constant(lhs) && is_constant(rhs)) return constant(lhs.constant & rhs.constant);
+		if (is_constant(lhs)) std::swap(lhs, rhs);
+		if (!is_constant(rhs)) return {};
+		if (rhs.constant == 0u) return constant(0u);
+		const uint32_t mask = rhs.constant;
+		if (lhs.kind != Kind::Affine || (mask & (mask + 1u)) != 0u) return {};
+		// A low-bit mask either covers every reachable value or only bits
+		// that no control point can set.
+		if (maximum(lhs) <= mask) return lhs;
+		return (lhs.coefficient & mask) == 0u && (lhs.constant & mask) == 0u ? constant(0u)
+		                                                                     : Address {};
+	};
+	// OR and XOR equal addition when a constant's bits are disjoint from every
+	// reachable value of the other operand.
+	const auto disjoint = [&](Address lhs, Address rhs) -> Address {
+		if (is_constant(lhs)) std::swap(lhs, rhs);
+		if (lhs.kind != Kind::Affine || !is_constant(rhs)) return {};
+		const uint64_t max = maximum(lhs);
+		if (max > UINT32_MAX) return {};
+		uint64_t span = 1u;
+		while (span <= max) span <<= 1u;
+		return (rhs.constant & (span - 1u)) == 0u ? add(lhs, rhs) : Address {};
+	};
+	const auto bit_or = [&](Address lhs, Address rhs) {
+		return is_constant(lhs) && is_constant(rhs) ? constant(lhs.constant | rhs.constant)
+		                                            : disjoint(lhs, rhs);
+	};
+	const auto bit_xor = [&](Address lhs, Address rhs) {
+		return is_constant(lhs) && is_constant(rhs) ? constant(lhs.constant ^ rhs.constant)
+		                                            : disjoint(lhs, rhs);
+	};
+	const auto subtract = [&](Address lhs, Address rhs) {
+		return lhs.kind == Kind::Affine && rhs.kind == Kind::Affine &&
+		               lhs.coefficient >= rhs.coefficient && lhs.constant >= rhs.constant
+		           ? affine(lhs.coefficient - rhs.coefficient, lhs.constant - rhs.constant)
+		           : Address {};
+	};
 	uint32_t stride = 0;
 	for (const auto& inst: program.instructions) {
 		// Stage exits preserve the active path's definitions. An internal join
@@ -134,10 +202,24 @@ uint32_t ReflectTessellationStride(const Decoder::Program& program, bool local,
 					value = multiply(rhs, constant(1u << lhs.constant));
 				break;
 			case Opcode::V_SUB_NC_U32:
-				if (lhs.kind == Kind::Affine && rhs.kind == Kind::Affine &&
-				    lhs.coefficient >= rhs.coefficient && lhs.constant >= rhs.constant)
-					value = affine(lhs.coefficient - rhs.coefficient, lhs.constant - rhs.constant);
-				break;
+			case Opcode::V_SUB_I32: value = subtract(lhs, rhs); break;
+			case Opcode::V_SUBREV_NC_U32:
+			case Opcode::V_SUBREV_I32: value = subtract(rhs, lhs); break;
+			case Opcode::V_MOV_B32: value = lhs; break;
+			case Opcode::V_ADD_NC_U32:
+			case Opcode::V_ADD_I32: value = add(lhs, rhs); break;
+			case Opcode::V_ADD3_U32: value = add(add(lhs, rhs), third); break;
+			case Opcode::V_ADD_LSHL_U32: value = shift_left(add(lhs, rhs), third); break;
+			case Opcode::V_MUL_LO_U32: value = multiply(lhs, rhs); break;
+			case Opcode::V_LSHL_B32: value = shift_left(lhs, rhs); break;
+			case Opcode::V_LSHRREV_B32: value = shift_right(rhs, lhs); break;
+			case Opcode::V_LSHR_B32: value = shift_right(lhs, rhs); break;
+			case Opcode::V_AND_B32: value = bit_and(lhs, rhs); break;
+			case Opcode::V_OR_B32: value = bit_or(lhs, rhs); break;
+			case Opcode::V_XOR_B32: value = bit_xor(lhs, rhs); break;
+			case Opcode::V_LSHL_OR_B32: value = bit_or(shift_left(lhs, rhs), third); break;
+			case Opcode::V_AND_OR_B32: value = bit_or(bit_and(lhs, rhs), third); break;
+			case Opcode::V_OR3_B32: value = bit_or(bit_or(lhs, rhs), third); break;
 			default: break;
 		}
 		if (inst.dst.sdwa_sel != 6u || inst.dst.op_sel || inst.dst.omod || inst.dst.clamp ||
