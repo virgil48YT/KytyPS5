@@ -63,6 +63,28 @@ namespace ImageViewOps {
 	}
 }
 
+[[nodiscard]] inline vk::Format BlockCompressedStorageViewFormat(vk::Format image_format) noexcept {
+	switch (image_format) {
+		case vk::Format::eBc1RgbSrgbBlock:
+		case vk::Format::eBc1RgbaSrgbBlock:
+		case vk::Format::eBc2SrgbBlock:
+		case vk::Format::eBc3SrgbBlock:
+		case vk::Format::eBc7SrgbBlock: return vk::Format::eR8G8B8A8Srgb;
+		case vk::Format::eBc1RgbUnormBlock:
+		case vk::Format::eBc1RgbaUnormBlock:
+		case vk::Format::eBc2UnormBlock:
+		case vk::Format::eBc3UnormBlock:
+		case vk::Format::eBc7UnormBlock: return vk::Format::eR8G8B8A8Unorm;
+		case vk::Format::eBc4SnormBlock: return vk::Format::eR8Snorm;
+		case vk::Format::eBc4UnormBlock: return vk::Format::eR8Unorm;
+		case vk::Format::eBc5SnormBlock: return vk::Format::eR8G8Snorm;
+		case vk::Format::eBc5UnormBlock: return vk::Format::eR8G8Unorm;
+		case vk::Format::eBc6HSfloatBlock:
+		case vk::Format::eBc6HUfloatBlock: return vk::Format::eR16G16B16A16Sfloat;
+		default: return vk::Format::eUndefined;
+	}
+}
+
 [[nodiscard]] inline bool IsSupportedSampledColorView(vk::Format image_format,
                                                       vk::Format view_format,
                                                       uint32_t   swizzle) noexcept {
@@ -109,8 +131,9 @@ IsSupportedSampledDepthResource(const ShaderRecompiler::IR::ImageResource& resou
 
 inline void ValidateStorageColorView(vk::Format image_format, vk::Format view_format,
                                      uint32_t swizzle) noexcept {
-	if (!ImageViewOps::FormatsCompatible(image_format, view_format) ||
-	    !IsValidImageSwizzle(swizzle)) {
+	const bool format_ok = ImageViewOps::FormatsCompatible(image_format, view_format) ||
+	                      BlockCompressedStorageViewFormat(image_format) == view_format;
+	if (!format_ok || !IsValidImageSwizzle(swizzle)) {
 		UnsupportedColorView("storage", image_format, view_format, swizzle);
 	}
 }

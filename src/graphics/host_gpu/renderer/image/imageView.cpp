@@ -330,6 +330,11 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 
 	const bool format_compatible = normalized.format != vk::Format::eUndefined &&
 	                               ImageViewOps::FormatsCompatible(image.format, normalized.format);
+	const bool block_storage_view = is_storage &&
+	                               (image.flags & vk::ImageCreateFlagBits::eBlockTexelViewCompatible) &&
+	                               !format_compatible &&
+	                               BlockCompressedStorageViewFormat(image.format) == normalized.format;
+	const bool view_format_ok = format_compatible || block_storage_view;
 	const bool slice_view =
 	    image.image_type == vk::ImageType::e3D && (normalized.type == vk::ImageViewType::e2D ||
 	                                               normalized.type == vk::ImageViewType::e2DArray);
@@ -345,7 +350,7 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 	const bool mapping_valid =
 	    IsComponentSwizzle(normalized.mapping.r) && IsComponentSwizzle(normalized.mapping.g) &&
 	    IsComponentSwizzle(normalized.mapping.b) && IsComponentSwizzle(normalized.mapping.a);
-	if (image.image == nullptr || !format_compatible || !ranges_valid || !mapping_valid ||
+	if (image.image == nullptr || !view_format_ok || !ranges_valid || !mapping_valid ||
 	    !IsValidViewType(image, normalized) || !IsValidAspect(image, normalized.aspect)) {
 		EXIT("invalid image view: image_format=%d view_format=%d type=%d aspect=0x%x "
 		     "mip=%u+%u layer=%u+%u usage=0x%x image_levels=%u image_layers=%u\n",

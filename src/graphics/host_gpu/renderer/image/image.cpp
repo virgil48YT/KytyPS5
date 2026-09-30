@@ -62,12 +62,25 @@ namespace {
 			                                      nullptr) == vk::Result::eSuccess) {
 				usage = storage;
 			} else {
-				static std::atomic_flag warned = ATOMIC_FLAG_INIT;
-				if (!warned.test_and_set(std::memory_order_relaxed)) {
-					Log::WriteToConsoleAndLog(fmt::format(
-					    "Warning: format {} does not support storage access; block-compressed "
-					    "textures written by the guest will not render.\n",
-					    vk::to_string(info.pixel_format)));
+				// The compressed format may not support storage, but the
+				// uncompressed equivalent (used for block texel views) might.
+				// With eExtendedUsage already set, the image can be created
+				// with eStorage if any compatible format supports it.
+				const auto uncompressed = BlockCompressedStorageViewFormat(info.pixel_format);
+				if (uncompressed != vk::Format::eUndefined &&
+				    graphics.GetImageFormatProperties(uncompressed, HostImageType(info.type),
+				                                      vk::ImageTiling::eOptimal, storage,
+				                                      ImageCreateFlags(graphics, info),
+				                                      nullptr) == vk::Result::eSuccess) {
+					usage = storage;
+				} else {
+					static std::atomic_flag warned = ATOMIC_FLAG_INIT;
+					if (!warned.test_and_set(std::memory_order_relaxed)) {
+						Log::WriteToConsoleAndLog(fmt::format(
+						    "Warning: format {} does not support storage access; block-compressed "
+						    "textures written by the guest will not render.\n",
+						    vk::to_string(info.pixel_format)));
+					}
 				}
 			}
 		}

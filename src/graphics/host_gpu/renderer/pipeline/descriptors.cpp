@@ -654,9 +654,15 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	                                            format == Prospero::BufferFormat::k32SInt)
 	                                     ? vk::Format::eR32Uint
 	                                     : SrgbStorageViewFormat(pixel_format);
-	const auto view_format         = storage && storage_view_format != vk::Format::eUndefined
+	auto       view_format         = storage && storage_view_format != vk::Format::eUndefined
 	                                     ? storage_view_format
 	                                     : pixel_format;
+	if (storage) {
+		const auto block_storage = BlockCompressedStorageViewFormat(pixel_format);
+		if (block_storage != vk::Format::eUndefined) {
+			view_format = block_storage;
+		}
+	}
 	const auto block_bytes         = Prospero::BlockCompressedBytesPerBlock(format);
 	TextureCache::ImageDesc desc {};
 	desc.info.data         = {address, size.size};
