@@ -16,13 +16,39 @@ uint32_t TessellationPointer(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto storage = input ? spv::StorageClassInput : spv::StorageClassOutput;
 	const auto pointer = state.builder.AllocateId();
 	if (kind == Attribute::Factor) {
-		EXIT_NOT_IMPLEMENTED(!inst.Arg(1).IsImmediate());
-		const auto index = inst.Arg(1).U32() / 4u;
-		const auto outer = index < 3u;
-		EXIT_NOT_IMPLEMENTED(index >= 4u);
-		state.builder.AddFunction(spv::OpAccessChain, TypePointer(state, storage, TypeF32(state)),
-		                          pointer, outer ? variable : state.tess_inner_variable,
-		                          ConstantU32(state, outer ? index : index - 3u));
+		if (inst.Arg(1).IsImmediate()) {
+			const auto index = inst.Arg(1).U32() / 4u;
+			const auto outer = index < 3u;
+			EXIT_NOT_IMPLEMENTED(index >= 4u);
+			state.builder.AddFunction(spv::OpAccessChain, TypePointer(state, storage, TypeF32(state)),
+			                          pointer, outer ? variable : state.tess_inner_variable,
+			                          ConstantU32(state, outer ? index : index - 3u));
+			return pointer;
+		}
+		const auto address   = ctx.Arg(inst, 1);
+		const auto index     = EmitBinaryU32(state, spv::OpUDiv, address, ConstantU32(state, 4u));
+		const auto is_outer  = EmitULessThan32(state, index, ConstantU32(state, 3u));
+		const auto ptr_type  = TypePointer(state, storage, TypeF32(state));
+		const auto then_label  = state.builder.AllocateId();
+		const auto else_label  = state.builder.AllocateId();
+		const auto merge_label = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpSelectionMerge, merge_label, spv::SelectionControlMaskNone);
+		state.builder.AddFunction(spv::OpBranchConditional, is_outer, then_label, else_label);
+		EmitLabel(state, then_label);
+		const auto outer_ptr = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpAccessChain, ptr_type, outer_ptr, variable, index);
+		const auto then_exit = state.current_label;
+		state.builder.AddFunction(spv::OpBranch, merge_label);
+		EmitLabel(state, else_label);
+		const auto inner_index = EmitBinaryU32(state, spv::OpISub, index, ConstantU32(state, 3u));
+		const auto inner_ptr  = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpAccessChain, ptr_type, inner_ptr,
+		                          state.tess_inner_variable, inner_index);
+		const auto else_exit = state.current_label;
+		state.builder.AddFunction(spv::OpBranch, merge_label);
+		EmitLabel(state, merge_label);
+		state.builder.AddFunction(spv::OpPhi, ptr_type, pointer, outer_ptr, then_exit, inner_ptr,
+		                          else_exit);
 		return pointer;
 	}
 	auto address = ctx.Arg(inst, 1);
