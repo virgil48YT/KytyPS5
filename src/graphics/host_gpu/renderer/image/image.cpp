@@ -710,11 +710,21 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 	                                      create.usage, create.flags,
 	                                      &properties) != vk::Result::eSuccess ||
 	    !static_cast<bool>(properties.sampleCounts & create.samples)) {
-		EXIT("image format does not support required usage: format=%d type=%d usage=0x%x "
-		     "flags=0x%x samples=%u\n",
-		     static_cast<int>(create.format), static_cast<int>(create.imageType),
-		     static_cast<vk::ImageUsageFlags::MaskType>(create.usage),
-		     static_cast<vk::ImageCreateFlags::MaskType>(create.flags), info.samples);
+		// With eExtendedUsage, the image can be created with usage flags
+		// supported by a compatible format even if the specified format
+		// doesn't support them. Verify via the uncompressed equivalent.
+		const auto uncompressed = BlockCompressedStorageViewFormat(create.format);
+		if (uncompressed == vk::Format::eUndefined ||
+		    graphics.GetImageFormatProperties(uncompressed, create.imageType, create.tiling,
+		                                      create.usage, create.flags,
+		                                      &properties) != vk::Result::eSuccess ||
+		    !static_cast<bool>(properties.sampleCounts & create.samples)) {
+			EXIT("image format does not support required usage: format=%d type=%d usage=0x%x "
+			     "flags=0x%x samples=%u\n",
+			     static_cast<int>(create.format), static_cast<int>(create.imageType),
+			     static_cast<vk::ImageUsageFlags::MaskType>(create.usage),
+			     static_cast<vk::ImageCreateFlags::MaskType>(create.flags), info.samples);
+		}
 	}
 
 	if (!graphics.CreateImage(create, backing)) {
