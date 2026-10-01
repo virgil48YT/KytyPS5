@@ -6,6 +6,7 @@
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/threads.h"
+#include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
@@ -38,6 +39,15 @@
 namespace Libs::Graphics {
 
 namespace {
+
+// Physical attachment components that exist in the guest format and are enabled for writing.
+uint32_t PhysicalColorWriteMask(const HW::RenderTarget& rt, uint32_t physical_mask) {
+	const auto components =
+	    Prospero::ResolveRenderTargetFormat(rt.info.format, rt.info.channel_type).components;
+	const uint32_t present =
+	    components >= 1u && components <= 4u ? (1u << components) - 1u : 0x0fu;
+	return physical_mask & present;
+}
 
 vk::PolygonMode ResolvePolygonMode(const HW::ModeControl& mode, bool cull_front, bool cull_back) {
 	// CxPrimitiveSetup::PolygonMode disables both per-face modes when it is zero.
@@ -733,8 +743,21 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 		const bool alpha_remap =
 		    slot == 0 && ps_input_info != nullptr && ps_input_info->alpha_blend_source_remap;
 		static_params.blend_enable[slot] = bc.enable && !rt.info.blend_bypass;
-		if (static_params.blend_enable[slot] && !alpha_remap &&
-		    ClassifyBlendMapping(bc, colors[i].export_mapping) != BlendMappingSupport::Direct) {
+		const auto blend_support =
+		    static_params.blend_enable[slot] && !alpha_remap
+		        ? ClassifyBlendMapping(bc, colors[i].export_mapping,
+		                               PhysicalColorWriteMask(rt, static_params.color_mask[slot]))
+		        : BlendMappingSupport::Direct;
+		if (blend_support == BlendMappingSupport::LogicalAlpha) {
+			const auto alpha_bc                      = LogicalAlphaBlendControl(bc);
+			static_params.color_srcblend[slot]       = alpha_bc.color_srcblend;
+			static_params.color_comb_fcn[slot]       = alpha_bc.color_comb_fcn;
+			static_params.color_destblend[slot]      = alpha_bc.color_destblend;
+			static_params.alpha_srcblend[slot]       = alpha_bc.alpha_srcblend;
+			static_params.alpha_comb_fcn[slot]       = alpha_bc.alpha_comb_fcn;
+			static_params.alpha_destblend[slot]      = alpha_bc.alpha_destblend;
+			static_params.separate_alpha_blend[slot] = alpha_bc.separate_alpha_blend;
+		} else if (blend_support != BlendMappingSupport::Direct) {
 			static_params.blend_enable[slot] = false;
 			static std::atomic_bool warned = false;
 			if (!warned.exchange(true, std::memory_order_relaxed)) {

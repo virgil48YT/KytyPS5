@@ -12319,6 +12319,36 @@ void TestBlendMappingClassification() {
   blend.color_srcblend = static_cast<uint8_t>(Factor::kDstAlpha);
   Check(classify(Prospero::ColorMappingAbgr) == Support::Unsupported,
         "destination alpha incorrectly used the physical alpha channel");
+
+  // Single-channel alpha targets store logical alpha in physical R.
+  const auto alpha8 = Prospero::ColorMappingAgba;
+  Check(ClassifyBlendMapping(blend, alpha8, 0x1u) == Support::LogicalAlpha &&
+            ClassifyBlendMapping(blend, Prospero::ColorMappingRabg, 0x3u) ==
+                Support::Unsupported &&
+            ClassifyBlendMapping(blend, Prospero::ColorMappingRgba, 0x8u) == Support::Direct,
+        "alpha-only physical writes were not classified by their logical component");
+  blend.separate_alpha_blend = true;
+  blend.color_srcblend = static_cast<uint8_t>(Factor::kSrcAlpha);
+  blend.color_destblend = static_cast<uint8_t>(Factor::kOneMinusSrcAlpha);
+  blend.alpha_srcblend = static_cast<uint8_t>(Factor::kZero);
+  blend.alpha_destblend = static_cast<uint8_t>(Factor::kOneMinusDstAlpha);
+  blend.alpha_comb_fcn = static_cast<uint8_t>(Prospero::BlendOp::kReverseSubtract);
+  Check(ClassifyBlendMapping(blend, alpha8, 0x1u) == Support::LogicalAlpha,
+        "separate alpha equation rejected on an alpha-only target");
+  const auto alpha_blend = LogicalAlphaBlendControl(blend);
+  Check(!alpha_blend.separate_alpha_blend &&
+            alpha_blend.color_srcblend == static_cast<uint8_t>(Factor::kZero) &&
+            alpha_blend.color_destblend == static_cast<uint8_t>(Factor::kOneMinusDstColor) &&
+            alpha_blend.color_comb_fcn ==
+                static_cast<uint8_t>(Prospero::BlendOp::kReverseSubtract) &&
+            alpha_blend.alpha_destblend == alpha_blend.color_destblend,
+        "alpha-only target did not use the guest alpha equation");
+  blend.alpha_srcblend = static_cast<uint8_t>(Factor::kSrcAlphaSaturate);
+  blend.alpha_destblend = static_cast<uint8_t>(Factor::kConstantColor);
+  const auto scalar_blend = LogicalAlphaBlendControl(blend);
+  Check(scalar_blend.color_srcblend == static_cast<uint8_t>(Factor::kOne) &&
+            scalar_blend.color_destblend == static_cast<uint8_t>(Factor::kConstantAlpha),
+        "alpha-only target did not reduce factors to their alpha components");
 }
 
 void TestLogicalAlphaBlendExport() {
