@@ -1349,6 +1349,16 @@ static int KYTY_SYSV_ABI KernelFsync(int fd) {
 	return OK;
 }
 
+// sceKernelFdatasync. On the host, KytyPS5's file handles flush through the
+// kernel/fileSystem layer, so this is a success no-op, identical to KernelFsync.
+static int KYTY_SYSV_ABI KernelFdatasync(int fd) {
+	PRINT_NAME();
+
+	LOGF("\t fd = %d\n", fd);
+
+	return OK;
+}
+
 static void KYTY_SYSV_ABI KernelSync() {
 	PRINT_NAME();
 }
@@ -2980,6 +2990,26 @@ int KYTY_SYSV_ABI KernelAioPollRequests(int32_t* ids, int32_t num, int32_t* stat
 	return OK;
 }
 
+int KYTY_SYSV_ABI KernelAioCancelRequest(int32_t id, int32_t* state) {
+	PRINT_NAME();
+
+	LOGF("\t id = %d\n", id);
+
+	if (state == nullptr) {
+		return LibKernel::KERNEL_ERROR_EFAULT;
+	}
+
+	if (kernel_aio_is_valid_id(id)) {
+		g_kernel_aio_state[id].store(KERNEL_AIO_STATE_ABORTED, std::memory_order_release);
+		*state = KERNEL_AIO_STATE_ABORTED;
+	} else {
+		// The PS5 SDK does not allocate submit id 0; the real API reports the
+		// request as still processing for such ids (see shadPS4's implementation).
+		*state = KERNEL_AIO_STATE_PROCESSING;
+	}
+	return OK;
+}
+
 int KYTY_SYSV_ABI KernelAioWaitRequests(int32_t* ids, int32_t num, int32_t* states, uint32_t mode,
                                         uint32_t* usec) {
 	PRINT_NAME();
@@ -3386,6 +3416,7 @@ LIB_DEFINE(InitLibKernel_1) {
 	LIB_FUNC("tU5e3f9gSiU", LibKernel::KernelIsTrinityMode);
 	LIB_FUNC("NH6xARDOVv8", LibKernel::KernelGetOperationMode);
 	LIB_FUNC("fTx66l5iWIA", LibKernel::KernelFsync);
+	LIB_FUNC("30Rh4ixbKy4", KernelFdatasync); // sceKernelFdatasync
 	LIB_FUNC("uvT2iYBBnkY", LibKernel::KernelSync);
 	LIB_FUNC("HoLVWNanBBc", LibKernel::getpid);
 	LIB_FUNC("9BcDykPmo1I", LibKernel::get_error_addr);
@@ -3410,6 +3441,7 @@ LIB_DEFINE(InitLibKernel_1) {
 	LIB_FUNC("o7O4z3jwKzo", KernelAioPollRequests);
 	LIB_FUNC("KOF-oJbQVvc", KernelAioWaitRequest);
 	LIB_FUNC("lgK+oIWkJyA", KernelAioWaitRequests);
+	LIB_FUNC("fR521KIGgb8", KernelAioCancelRequest); // sceKernelAioCancelRequest
 	LIB_FUNC("XQ8C8y+de+E", KernelAioSubmitWriteCommands);
 	LIB_FUNC("nu4a0-arQis", KernelAioInitializeParam);
 	LIB_FUNC("il03nluKfMk", LibKernel::KernelRaiseException);

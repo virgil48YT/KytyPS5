@@ -63,8 +63,16 @@ static KYTY_SYSV_ABI int VideoOutVrrStatus_kP2L8t3j_aM() {
 	return OK;
 }
 
+static KYTY_SYSV_ABI int VideoOutVrrStatus_LibwuIonIBw() {
+	// This is the remaining VideoOutVrrStatus export (the ps5rs catalog lists only four
+	// members for this module: -q-vbO859Tw, gWT7X8H0bYs, kP2L8t3j-aM, LibwuIonIBw).
+	// The observed guest call passes no arguments; return success for the fixed-refresh path.
+	return OK;
+}
+
 LIB_DEFINE(InitVideoOutVrrStatus_1) {
 	LIB_FUNC("kP2L8t3j-aM", VideoOutVrrStatus_kP2L8t3j_aM);
+	LIB_FUNC("LibwuIonIBw", VideoOutVrrStatus_LibwuIonIBw);
 }
 
 } // namespace LibGen5::VrrStatus
