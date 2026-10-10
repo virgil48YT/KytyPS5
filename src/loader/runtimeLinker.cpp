@@ -203,16 +203,19 @@ static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_id) {
 	if (log_index < 1024) {
 		if (record_id < g_stubbed_imports.size()) {
 			const auto& record = g_stubbed_imports[record_id];
-			printf("Unresolved import stub called: %s\n", record.name.c_str());
-			LOGF("Unresolved import stub called [%u]: patch_vaddr=0x%016" PRIx64
-			     " jmprela_index=%" PRIu32 " symbol=%s type=%s bind=%s program=%s\n",
-			     log_index, record.patch_vaddr, record.index, record.name.c_str(),
-			     magic_enum::enum_name(record.type), magic_enum::enum_name(record.bind),
-			     record.program.c_str());
+			// Route through Log::WriteToConsoleAndLog so both the console and the file log capture
+			// the stub call. Raw std::printf only reaches the console, which made _kyty.txt crash
+			// reports omit the unresolved-import warnings entirely.
+			Log::WriteToConsoleAndLog(fmt::format(
+			    "Unresolved import stub called [{}]: patch_vaddr=0x{:016x} jmprela_index={} "
+			    "symbol={} type={} bind={} program={}\n",
+			    log_index, record.patch_vaddr, record.index, record.name,
+			    magic_enum::enum_name(record.type), magic_enum::enum_name(record.bind),
+			    record.program));
 		} else {
-			printf("Unresolved import stub called: <bad-record>\n");
-			LOGF("Unresolved import stub called [%u]: record_id=%" PRIu64 " symbol=<bad-record>\n",
-			     log_index, record_id);
+			Log::WriteToConsoleAndLog(fmt::format(
+			    "Unresolved import stub called [{}]: record_id={} symbol=<bad-record>\n", log_index,
+			    record_id));
 		}
 	}
 	return 0;
