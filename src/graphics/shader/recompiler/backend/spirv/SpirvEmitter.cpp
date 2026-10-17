@@ -441,8 +441,8 @@ uint32_t FunctionLdsDwords(const IR::Program& program, uint32_t& unbounded_pc) {
 				unbounded_pc = flags.pc;
 				return 0;
 			}
-			end_bytes = std::max(end_bytes, address->max + memory.offset +
-			                                    4ull * IR::SharedComponentCount(op));
+			end_bytes = std::max<uint64_t>(end_bytes, address->max + memory.offset +
+			                                   4ull * IR::SharedComponentCount(op));
 		}
 	}
 	return static_cast<uint32_t>(std::clamp<uint64_t>((end_bytes + 3u) / 4u, 1u, 8192u));
