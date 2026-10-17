@@ -33,6 +33,16 @@ struct ExceptionInfo {
 	uint32_t            native_code            = 0;
 	// Platform-specific mutable context, valid only for the duration of the handler call.
 	void* native_context = nullptr;
+	// Filled by the platform layer when the faulting instruction resolves to a loaded
+	// module, so crash reports can name it instead of a raw address. Stays empty when
+	// the faulting address does not belong to any module.
+	char     faulting_module[260] {};
+	uint64_t faulting_module_base = 0;
+	// True on the last-chance dispatch (POSIX signal handler, Windows unhandled-exception
+	// filter), where an unresolved fault must terminate with a fatal report. Windows
+	// first-chance dispatches leave it false so host __try/__except handlers can recover
+	// the fault before the emulator treats it as fatal.
+	bool last_chance = false;
 };
 
 using Handler = bool (*)(const ExceptionInfo&);

@@ -82,20 +82,49 @@ bool InitializeThreadSignalStack() {
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 
-static LONG WINAPI ExceptionFilter(PEXCEPTION_POINTERS exception) noexcept {
+// Resolve the module that contains the faulting instruction, so a crash report names
+// it instead of a raw address. Failure leaves the fields empty.
+static void FillFaultingModule(ExceptionInfo& info) noexcept {
+	HMODULE module = nullptr;
+	if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+	                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+	                       reinterpret_cast<LPCWSTR>(info.exception_address), &module) == 0 ||
+	    module == nullptr) {
+		return;
+	}
+
+	wchar_t wide_path[1024] {};
+	if (GetModuleFileNameW(module, wide_path,
+	                       static_cast<DWORD>(sizeof(wide_path) / sizeof(wide_path[0]))) == 0) {
+		return;
+	}
+	// Keep only the file name: drivers print as e.g. atio64xx.dll+0x1234, which is
+	// stable across ASLR and comparable with a different run's module layout.
+	auto* name_end = wide_path;
+	while (*name_end != L'\0') {
+		++name_end;
+	}
+	auto* name_begin = name_end;
+	while (name_begin != wide_path && *(name_begin - 1) != L'\\' && *(name_begin - 1) != L'/') {
+		--name_begin;
+	}
+	if (name_begin == name_end) {
+		return;
+	}
+	if (WideCharToMultiByte(CP_UTF8, 0, name_begin, -1, info.faulting_module,
+	                        static_cast<int>(sizeof(info.faulting_module)) - 1, nullptr,
+	                        nullptr) == 0) {
+		info.faulting_module[0] = '\0';
+		return;
+	}
+	info.faulting_module_base = reinterpret_cast<uint64_t>(module);
+}
+
+// Fills ExceptionInfo for an AV / illegal-instruction dispatch. Returns false for
+// exception codes the emulator does not act on.
+static bool FillExceptionInfo(PEXCEPTION_POINTERS exception, ExceptionInfo& info) noexcept {
 	auto* exception_record = exception->ExceptionRecord;
 
-	if (exception_record->ExceptionCode == DBG_PRINTEXCEPTION_C ||
-	    exception_record->ExceptionCode == DBG_PRINTEXCEPTION_WIDE_C) {
-		return EXCEPTION_CONTINUE_SEARCH;
-	}
-
-	if (exception_record->ExceptionCode == 0x406D1388) {
-		// Set a thread name.
-		return EXCEPTION_CONTINUE_EXECUTION;
-	}
-
-	ExceptionInfo info {};
 	info.exception_address = reinterpret_cast<uint64_t>(exception_record->ExceptionAddress);
 	info.native_code       = exception_record->ExceptionCode;
 	info.native_context    = exception->ContextRecord;
@@ -112,7 +141,7 @@ static LONG WINAPI ExceptionFilter(PEXCEPTION_POINTERS exception) noexcept {
 	} else if (exception_record->ExceptionCode == EXCEPTION_ILLEGAL_INSTRUCTION) {
 		info.type = ExceptionType::IllegalInstruction;
 	} else {
-		return EXCEPTION_CONTINUE_SEARCH;
+		return false;
 	}
 
 	info.rax = exception->ContextRecord->Rax;
@@ -131,6 +160,56 @@ static LONG WINAPI ExceptionFilter(PEXCEPTION_POINTERS exception) noexcept {
 	info.r13 = exception->ContextRecord->R13;
 	info.r14 = exception->ContextRecord->R14;
 	info.r15 = exception->ContextRecord->R15;
+	return true;
+}
+
+// First-chance vectored handler. Only emulator-owned faults (guest instruction
+// emulation, GPU page-fault tracking) resolve here and continue execution; anything
+// else continues searching so a host __try/__except (driver, SDL, CRT) can still
+// recover the exception before the emulator treats it as fatal.
+static LONG WINAPI ExceptionFilter(PEXCEPTION_POINTERS exception) noexcept {
+	auto* exception_record = exception->ExceptionRecord;
+
+	if (exception_record->ExceptionCode == DBG_PRINTEXCEPTION_C ||
+	    exception_record->ExceptionCode == DBG_PRINTEXCEPTION_WIDE_C) {
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+
+	if (exception_record->ExceptionCode == 0x406D1388) {
+		// Set a thread name.
+		return EXCEPTION_CONTINUE_EXECUTION;
+	}
+
+	ExceptionInfo info {};
+	if (!FillExceptionInfo(exception, info)) {
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+
+	const auto handler = g_handler.load(std::memory_order_acquire);
+	if (handler != nullptr && handler(info)) {
+		return EXCEPTION_CONTINUE_EXECUTION;
+	}
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// Last-chance unhandled-exception filter: dispatches with last_chance set, so an
+// unresolved fault is reported and terminates instead of reaching the OS crash
+// dialog.
+static LONG WINAPI UnhandledExceptionFilter(PEXCEPTION_POINTERS exception) noexcept {
+	auto* exception_record = exception->ExceptionRecord;
+
+	if (exception_record->ExceptionCode == DBG_PRINTEXCEPTION_C ||
+	    exception_record->ExceptionCode == DBG_PRINTEXCEPTION_WIDE_C ||
+	    exception_record->ExceptionCode == 0x406D1388) {
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+
+	ExceptionInfo info {};
+	if (!FillExceptionInfo(exception, info)) {
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+	info.last_chance = true;
+	FillFaultingModule(info);
 
 	const auto handler = g_handler.load(std::memory_order_acquire);
 	if (handler != nullptr && handler(info)) {
@@ -197,6 +276,9 @@ static void SignalHandler(int sig, siginfo_t* si, void* uctx) {
 	info.r13 = ss.__r13;
 	info.r14 = ss.__r14;
 	info.r15 = ss.__r15;
+	// A signal handler is the only dispatch; an unresolved fault reports and
+	// terminates right here.
+	info.last_chance = true;
 
 	const auto handler = g_handler.load(std::memory_order_acquire);
 	if (handler != nullptr && handler(info)) {
@@ -268,6 +350,9 @@ static void SignalHandler(int signal_number, siginfo_t* signal_info, void* nativ
 	info.r13 = static_cast<uint64_t>(gregs[REG_R13]);
 	info.r14 = static_cast<uint64_t>(gregs[REG_R14]);
 	info.r15 = static_cast<uint64_t>(gregs[REG_R15]);
+	// A signal handler is the only dispatch; an unresolved fault reports and
+	// terminates right here.
+	info.last_chance = true;
 
 	const auto handler = g_handler.load(std::memory_order_acquire);
 	if (handler != nullptr && handler(info)) {
@@ -298,6 +383,9 @@ bool InstallHandler(Handler handler) {
 		printf("AddVectoredExceptionHandler() failed\n");
 		return false;
 	}
+	// The unhandled-exception filter reports and terminates what nothing else
+	// recovered; a null return only means no previous filter existed.
+	SetUnhandledExceptionFilter(UnhandledExceptionFilter);
 #elif defined(__APPLE__)
 	struct sigaction sa {};
 	sa.sa_sigaction = SignalHandler;
