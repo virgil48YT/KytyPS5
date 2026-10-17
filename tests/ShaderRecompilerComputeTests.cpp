@@ -275,6 +275,20 @@ struct StreamBufferTestAccess {
                                    uint64_t &alignment) {
     return StreamBuffer::NormalizeReservation(coherent, atom, size, alignment);
   }
+
+  static bool UnscopedCommitReported(const StreamBuffer &stream) {
+    return stream.m_unscoped_reported;
+  }
+
+  static void ResetUnscopedCommitReport(StreamBuffer &stream) {
+    stream.m_unscoped_reported = false;
+  }
+
+  static bool LastWatchIs(const StreamBuffer &stream, uint64_t tick, bool sealed) {
+    if (stream.m_current_watch_cursor == 0) return false;
+    const auto &watch = stream.m_current_watches[stream.m_current_watch_cursor - 1];
+    return watch.tick == tick && watch.sealed == sealed;
+  }
 };
 
 struct ImageTestAccess {
@@ -3034,6 +3048,31 @@ public:
             "download reservations share a non-coherent atom or lost caller "
             "alignment");
     download.Commit();
+
+    // Resource preparation can submit after a CPU upload but before its GPU consumer is
+    // recorded. A dispatch-wide hold must carry that upload to the new recording tick;
+    // after the consumer is recorded its watch must stop following later submissions.
+    {
+      StreamHold hold(upload_stream);
+      (void)upload_stream.Copy(overflow_data.data(), overflow_data.size(), 16);
+      const auto producer_tick = scheduler.CurrentTick();
+      Require("StreamBufferRing", "unrecorded consumer",
+              StreamBufferTestAccess::LastWatchIs(upload_stream, producer_tick, false),
+              "a held reservation was sealed before recording its consumer");
+      scheduler.Flush();
+      Require("StreamBufferRing", "consumer crosses submission",
+              scheduler.CurrentTick() > producer_tick &&
+                  StreamBufferTestAccess::LastWatchIs(upload_stream, scheduler.CurrentTick(), false),
+              "a held upload retired with the producer instead of the later consumer");
+    }
+    const auto consumer_tick = scheduler.CurrentTick();
+    Require("StreamBufferRing", "recorded consumer",
+            StreamBufferTestAccess::LastWatchIs(upload_stream, consumer_tick, true),
+            "closing the consumer hold did not seal its reservation");
+    scheduler.Flush();
+    Require("StreamBufferRing", "sealed consumer does not float",
+            StreamBufferTestAccess::LastWatchIs(upload_stream, consumer_tick, true),
+            "a completed consumer's reservation followed an unrelated submission");
 
     scheduler.Finish();
     download.Invalidate(download_offset, 16);
@@ -13705,6 +13744,44 @@ public:
         }
       }
       host_lds_limit = saved_lds_limit;
+
+      // CPU-authored indirect arguments take ObtainBuffer's stream-upload path. This used to
+      // commit without the dispatch-wide hold used by direct dispatches, allowing a later
+      // resource-preparation submission to retire the arguments before their consumer.
+      constexpr auto cpu_args = base + 0xd0000;
+      constexpr auto cpu_output = base + 0xe0000;
+      const std::array<u32, 3> cpu_groups{2u, 1u, 1u};
+      LibKernel::Memory::WriteBacking(cpu_args, cpu_groups.data(), sizeof(cpu_groups));
+      cache.FillBuffer(cpu_output, 16u * sizeof(u32), sentinel, false);
+      Require(name, "CPU-owned indirect arguments",
+              cache.IsRegionCpuModified(cpu_args, sizeof(cpu_groups)) &&
+                  !cache.HasGpuDirtyBytes(cpu_args, sizeof(cpu_groups)),
+              "the indirect argument fixture did not select the stream-upload path");
+      shaders.SetCsShader({.data_addr = reinterpret_cast<uint64_t>(consumer.data()),
+                           .num_thread_x = 4, .num_thread_y = 1, .num_thread_z = 1,
+                           .wave_size = 64, .user_sgpr = 4, .tgid_x_en = true});
+      set_buffer(0, cpu_output, 16u * sizeof(u32));
+      auto &stream = cache.GetUtilityBuffer(MemoryUsage::Stream);
+      StreamBufferTestAccess::ResetUnscopedCommitReport(stream);
+      const std::array<u32, 3> cpu_packet{static_cast<u32>(cpu_args),
+                                         static_cast<u32>(cpu_args >> 32u), 0x8041u};
+      Require(name, "CPU-authored indirect packet",
+              CpOpDispatchIndirect(processor, 0xc0021600u, cpu_packet.data(), 0, 0) == 3,
+              "the CPU-authored indirect packet was not consumed");
+      Require(name, "indirect stream reservation scope",
+              !StreamBufferTestAccess::UnscopedCommitReported(stream) &&
+                  StreamBufferTestAccess::LastWatchIs(stream, scheduler.CurrentTick(), true),
+              "indirect arguments or shader data were committed without a consumer hold");
+      cache.ReadMemory(cpu_output, 16u * sizeof(u32));
+      std::array<u32, 16> cpu_actual{};
+      Require(name, "CPU-authored indirect output",
+              LibKernel::Memory::TryReadBacking(cpu_output, cpu_actual.data(), sizeof(cpu_actual)),
+              "the CPU-authored indirect result could not be read back");
+      for (u32 word = 0; word < cpu_actual.size(); word++) {
+        Require(name, "CPU-authored indirect invocation coverage",
+                cpu_actual[word] == (word < 8u ? word + 1u : sentinel),
+                "the streamed arguments did not preserve their invocation counts");
+      }
       context.UnmapMemory(base, allocation_size);
       scheduler.Finish();
     });
