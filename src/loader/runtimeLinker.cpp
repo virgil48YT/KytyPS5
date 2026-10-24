@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/debugBreadcrumb.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -40,6 +41,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <tlhelp32.h>
 #include <windows.h>
 #else
 #if defined(__APPLE__)
@@ -650,6 +652,105 @@ static bool IsReadableRange(uint64_t addr, uint64_t size) {
 	return true;
 }
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+static bool IsExecutableCodeAddress(uint64_t addr) {
+	if (addr == 0) {
+		return false;
+	}
+
+	MEMORY_BASIC_INFORMATION mbi {};
+	if (VirtualQuery(reinterpret_cast<const void*>(addr), &mbi, sizeof(mbi)) == 0 ||
+	    mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+		return false;
+	}
+
+	const DWORD protect = mbi.Protect & 0xFF;
+	return protect == PAGE_EXECUTE || protect == PAGE_EXECUTE_READ ||
+	       protect == PAGE_EXECUTE_READWRITE || protect == PAGE_EXECUTE_WRITECOPY;
+}
+
+static std::string DescribeHostCodeAddress(uint64_t addr) {
+	HMODULE module = nullptr;
+	if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+	                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+	                       reinterpret_cast<LPCSTR>(static_cast<uintptr_t>(addr)), &module) == 0 ||
+	    module == nullptr) {
+		return fmt::format("0x{:016x} <generated code>", addr);
+	}
+
+	char path[MAX_PATH] = {};
+	if (GetModuleFileNameA(module, path, MAX_PATH) == 0) {
+		return fmt::format("0x{:016x} <unknown module>", addr);
+	}
+	return fmt::format("0x{:016x} {}+0x{:x}", addr, path, addr - reinterpret_cast<uint64_t>(module));
+}
+
+// Host crashes frequently happen inside the Vulkan loader or the ICD, so naming the faulting
+// module and the code pointers left on the host stack is the only way to tell them apart from
+// Kyty's own code. Log::WriteFatal also mirrors the report to stdout, and unlike printf it lands
+// in the log file where it survives a launcher run.
+static void ReportHostExceptionModules(const Common::HostException::ExceptionInfo& info) {
+	std::string report =
+	    fmt::format("host thread id: {}\nlast host step: {}\nfault pc: {}\n",
+	                static_cast<unsigned long>(GetCurrentThreadId()),
+	                Common::DebugBreadcrumb::LastStep(),
+	                DescribeHostCodeAddress(info.exception_address));
+
+	if (IsReadableRange(info.rbp, 2 * sizeof(uint64_t)) && info.rbp > info.rsp) {
+		report += "host frames (rbp chain):";
+		uint64_t frame = info.rbp;
+		for (int depth = 0; depth < 32; depth++) {
+			if (!IsReadableRange(frame, 2 * sizeof(uint64_t))) {
+				break;
+			}
+			const auto*    frame_data = reinterpret_cast<const uint64_t*>(frame);
+			const uint64_t next       = frame_data[0];
+			const uint64_t ret        = frame_data[1];
+			if (!IsExecutableCodeAddress(ret)) {
+				break;
+			}
+			report += fmt::format("\n [{:2}] {}", depth, DescribeHostCodeAddress(ret));
+			if (next <= frame) {
+				break;
+			}
+			frame = next;
+		}
+		report += "\n";
+	}
+
+	if (IsReadableRange(info.rsp, 32 * sizeof(uint64_t))) {
+		const auto* stack = reinterpret_cast<const uint64_t*>(info.rsp);
+		report += "code pointers on stack:";
+		bool found = false;
+		for (int i = 0; i < 32; i++) {
+			if (!IsExecutableCodeAddress(stack[i])) {
+				continue;
+			}
+			report += fmt::format("\n [{:2}] {}", i, DescribeHostCodeAddress(stack[i]));
+			found = true;
+		}
+		report += found ? "\n" : " none\n";
+	}
+
+	HANDLE snapshot =
+	    CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+	if (snapshot != INVALID_HANDLE_VALUE) {
+		MODULEENTRY32A entry {};
+		entry.dwSize = sizeof(entry);
+		report += "modules:";
+		for (BOOL ok = Module32FirstA(snapshot, &entry); ok; ok = Module32NextA(snapshot, &entry)) {
+			const auto base = reinterpret_cast<uint64_t>(entry.modBaseAddr);
+			report += fmt::format("\n {:016x}-{:016x} {}", base, base + entry.modBaseSize,
+			                      entry.szExePath);
+		}
+		report += "\n";
+		CloseHandle(snapshot);
+	}
+
+	Log::WriteFatal(report);
+}
+#endif
+
 static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_info) {
 	const auto* info = &exception_info;
 
@@ -713,6 +814,9 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			}
 			std::printf("\n");
 		}
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		ReportHostExceptionModules(*info);
+#endif
 		std::fflush(stdout);
 	}
 	EXIT("Unhandled host exception: type=%u code=%u pc=0x%016" PRIx64

@@ -2,6 +2,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/debugBreadcrumb.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/regionDefinitions.h"
@@ -469,6 +470,7 @@ void ImageHeap::WriteDescriptors() {
 		writes[write].descriptorType  = vk::DescriptorType::eSampledImage;
 		writes[write].pImageInfo      = &infos.back();
 	}
+	Common::DebugBreadcrumb::Set("image-heap: updateDescriptorSets");
 	m_context.GetGraphics().device.updateDescriptorSets(static_cast<uint32_t>(writes.size()),
 	                                                    writes.data(), 0, nullptr);
 	m_writes.clear();
@@ -513,6 +515,7 @@ void ImageHeap::Commit(CommandBuffer& buffer, vk::PipelineBindPoint bind_point,
 		});
 	}
 	m_active.clear();
+	Common::DebugBreadcrumb::Set("image-heap: bindDescriptorSets");
 	buffer.Handle().bindDescriptorSets(bind_point, layout, IR::ImageHeapSet, 1, &m_set, 0,
 	                                   nullptr);
 }

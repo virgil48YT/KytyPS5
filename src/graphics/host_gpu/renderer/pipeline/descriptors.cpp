@@ -3,6 +3,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/debugBreadcrumb.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
@@ -964,6 +965,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		}
 	}
 	if (pipeline.uses_image_heap) {
+		Common::DebugBreadcrumb::Set("bindings: image heap commit");
 		m_context.GetImageHeap().Commit(buffer, pipeline_bind_point, pipeline.pipeline_layout);
 	}
 	m_descriptor_images.resize(image_descriptor_count);
@@ -979,6 +981,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		const auto  shader_stages = ShaderPipelineStages(shader_stage);
 		if (descriptors.gds.buffer != nullptr) {
 			buffer.EndRendering();
+			Common::DebugBreadcrumb::Set("bindings: gds barrier");
 			const auto barrier = MakeGdsDependency(descriptors.gds.buffer);
 			vk_buffer.pipelineBarrier(
 			    vk::PipelineStageFlagBits::eHost | vk::PipelineStageFlagBits::eTransfer |
@@ -987,6 +990,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			    shader_stages, vk::DependencyFlags {}, 0, nullptr, 1, &barrier, 0, nullptr);
 		}
 
+		Common::DebugBreadcrumb::Set("bindings: image transitions");
 		for (uint32_t i = 0; i < program.info.images.size(); i++) {
 			auto& binding = descriptors.images[i];
 			if (!binding.image_id) continue;
@@ -1115,6 +1119,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 	}
 
 	if (has_push_data) {
+		Common::DebugBreadcrumb::Set("bindings: pushConstants");
 		vk_buffer.pushConstants(pipeline.pipeline_layout, push_stages, 0, sizeof(push_data),
 		                        push_data.dwords.data());
 	}
@@ -1122,17 +1127,21 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 	if (!m_descriptor_writes.empty()) {
 		EXIT_IF(pipeline.descriptor_set_layout == nullptr);
 		if (pipeline.uses_push_descriptors) {
+			Common::DebugBreadcrumb::Set("bindings: pushDescriptorSetKHR");
 			vk_buffer.pushDescriptorSetKHR(pipeline_bind_point, pipeline.pipeline_layout, 0,
 			                               static_cast<uint32_t>(m_descriptor_writes.size()),
 			                               m_descriptor_writes.data());
 		} else {
+			Common::DebugBreadcrumb::Set("bindings: DescriptorHeap::Commit");
 			const auto set = m_context.GetDescriptorHeap().Commit(pipeline.descriptor_set_layout);
 			for (auto& write: m_descriptor_writes) {
 				write.dstSet = set;
 			}
+			Common::DebugBreadcrumb::Set("bindings: updateDescriptorSets");
 			m_context.GetGraphics().device.updateDescriptorSets(
 			    static_cast<uint32_t>(m_descriptor_writes.size()), m_descriptor_writes.data(), 0,
 			    nullptr);
+			Common::DebugBreadcrumb::Set("bindings: bindDescriptorSets");
 			vk_buffer.bindDescriptorSets(pipeline_bind_point, pipeline.pipeline_layout, 0, 1, &set,
 			                             0, nullptr);
 		}

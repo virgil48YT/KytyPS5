@@ -1,5 +1,6 @@
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/debugBreadcrumb.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -310,6 +311,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		}
 	}
 	m_context.GetImageHeap().BeginDraw();
+	Common::DebugBreadcrumb::Set("compute: GetComputeProgram");
 	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info)) return;
 	if (use_thread_dimensions) {
 		input_info.dispatch_threads_num[0]    = thread_group_x;
@@ -347,26 +349,35 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	}
 
 	buffer.EndRendering();
+	Common::DebugBreadcrumb::Set("compute: GetComputePipeline");
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
 	auto& bindings = m_compute_bindings;
+	Common::DebugBreadcrumb::Set("compute: PrepareBindings");
 	PrepareBindings(input_info.stage, bindings);
 	if (program.bindings.dispatch_thread_dword != ShaderRecompiler::IR::PushData::NoStart) {
 		std::copy(std::begin(input_info.dispatch_threads_num), std::end(input_info.dispatch_threads_num),
 		          bindings.shader_data.begin() + program.bindings.dispatch_thread_dword);
 	}
 	PreparedBindings* descriptor_stage = &bindings;
+	Common::DebugBreadcrumb::Set("compute: FindBuffers");
 	FindBuffers(std::span {&descriptor_stage, 1u});
 	if (program.info.uses_dma) {
+		Common::DebugBreadcrumb::Set("compute: PrepareBda");
 		m_context.PrepareBda();
 	}
 	if (program.info.uses_image_heap) {
+		Common::DebugBreadcrumb::Set("compute: ImageHeap.Rebind");
 		m_context.GetImageHeap().Rebind(*this);
 	}
+	Common::DebugBreadcrumb::Set("compute: RebindImages");
 	RebindImages(bindings);
+	Common::DebugBreadcrumb::Set("compute: BindSharedMemory");
 	BindSharedMemory(m_context, input_info, bindings);
+	Common::DebugBreadcrumb::Set("compute: RebindBuffers");
 	RebindBuffers(bindings);
 
 	auto              vk_buffer        = buffer.Handle();
+	Common::DebugBreadcrumb::Set("compute: CommitBindings");
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
 	bool has_storage_writes = bindings.shared_memory.buffer != nullptr ||
@@ -445,6 +456,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		}
 	}
 
+	Common::DebugBreadcrumb::Set("compute: bindPipeline");
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 	constexpr uint32_t DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE = 1u << 3u;
 	const uint64_t     group_threads = uint64_t {std::max(input_info.threads_num[0], 1u)} *
@@ -454,6 +466,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	    group_threads <= input_info.wave_size && !input_info.lds_storage) {
 		// A single guest wave per group can run in launch order without a device-wide
 		// spinlock. Keep the guest workgroup IDs when splitting the dispatch.
+		Common::DebugBreadcrumb::Set("compute: dispatchBase");
 		for (uint32_t z = 0; z < thread_group_z; ++z) {
 			for (uint32_t y = 0; y < thread_group_y; ++y) {
 				for (uint32_t x = 0; x < thread_group_x; ++x) {
@@ -465,11 +478,13 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 			}
 		}
 	} else {
+		Common::DebugBreadcrumb::Set("compute: dispatch");
 		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 
 	// The removed host fence also ordered read-only dispatches before later writers.
+	Common::DebugBreadcrumb::Set("compute: post-dispatch barrier");
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
 }
@@ -497,27 +512,37 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	input_info.async_compute = async_compute;
 	input_info.indirect_args_address = args_addr;
 	m_context.GetImageHeap().BeginDraw();
+	Common::DebugBreadcrumb::Set("compute-indirect: GetComputeProgram");
 	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info)) return;
 	buffer.EndRendering();
+	Common::DebugBreadcrumb::Set("compute-indirect: GetComputePipeline");
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
 	auto& bindings = m_compute_bindings;
+	Common::DebugBreadcrumb::Set("compute-indirect: PrepareBindings");
 	PrepareBindings(input_info.stage, bindings);
 	PreparedBindings* descriptor_stage = &bindings;
+	Common::DebugBreadcrumb::Set("compute-indirect: FindBuffers");
 	FindBuffers(std::span {&descriptor_stage, 1u});
 	const auto& program = *input_info.stage.program;
 	if (program.info.uses_dma) {
+		Common::DebugBreadcrumb::Set("compute-indirect: PrepareBda");
 		m_context.PrepareBda();
 	}
+	Common::DebugBreadcrumb::Set("compute-indirect: BindSharedMemory");
 	BindSharedMemory(m_context, input_info, bindings, args_addr);
 	if (program.info.uses_image_heap) {
+		Common::DebugBreadcrumb::Set("compute-indirect: ImageHeap.Rebind");
 		m_context.GetImageHeap().Rebind(*this);
 	}
+	Common::DebugBreadcrumb::Set("compute-indirect: RebindImages");
 	RebindImages(bindings);
 	// Acquiring arguments can merge cache buffers; finalize shader bindings afterward.
 	const auto [args_buffer, args_offset] = m_context.GetBufferCache().ObtainBuffer(
 	    args_addr, sizeof(vk::DispatchIndirectCommand), false);
 	EXIT_IF(args_buffer == nullptr || (args_offset & 3u) != 0);
+	Common::DebugBreadcrumb::Set("compute-indirect: RebindBuffers");
 	RebindBuffers(bindings);
+	Common::DebugBreadcrumb::Set("compute-indirect: CommitBindings");
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
 	const auto vk_buffer = buffer.Handle();
@@ -538,9 +563,12 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	                              vk::PipelineStageFlagBits::eTransfer,
 	                          vk::PipelineStageFlagBits::eDrawIndirect, {},
 	                          1, &barrier, 0, nullptr, 0, nullptr);
+	Common::DebugBreadcrumb::Set("compute-indirect: bindPipeline");
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+	Common::DebugBreadcrumb::Set("compute-indirect: dispatchIndirect");
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
+	Common::DebugBreadcrumb::Set("compute-indirect: post-dispatch barrier");
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
 }
