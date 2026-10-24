@@ -42,7 +42,6 @@
 #define NOMINMAX
 #endif
 #include <windows.h> // IWYU pragma: keep
-#include <tlhelp32.h> // IWYU pragma: keep
 #else
 #if defined(__APPLE__)
 #include <mach/mach.h>
@@ -731,21 +730,6 @@ static void ReportHostExceptionModules(const Common::HostException::ExceptionInf
 			found = true;
 		}
 		report += found ? "\n" : " none\n";
-	}
-
-	HANDLE snapshot =
-	    CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
-	if (snapshot != INVALID_HANDLE_VALUE) {
-		MODULEENTRY32A entry {};
-		entry.dwSize = sizeof(entry);
-		report += "modules:";
-		for (BOOL ok = Module32FirstA(snapshot, &entry); ok; ok = Module32NextA(snapshot, &entry)) {
-			const auto base = reinterpret_cast<uint64_t>(entry.modBaseAddr);
-			report += fmt::format("\n {:016x}-{:016x} {}", base, base + entry.modBaseSize,
-			                      static_cast<const char*>(entry.szExePath));
-		}
-		report += "\n";
-		CloseHandle(snapshot);
 	}
 
 	Log::WriteFatal(report);

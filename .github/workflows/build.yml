@@ -110,13 +110,41 @@ jobs:
             -DCMAKE_PREFIX_PATH="%Qt6_DIR%"
 
       - name: Build
+        id: build
         shell: cmd
         run: |
           cmake --build _Build/windows --target launcher ^
             audio_out2_port_tests pad_haptics_tests controller_settings_tests host_input_tests ime_dialog_tests lru_cache_tests virtual_memory_allocation_tests ^
             shader_recompiler_compute_tests ^
             resource_tracking_tests scalar_provenance_tests ^
-            resource_materialization_tests shader_vertex_metadata_tests archive_file_tests avplayer_file_tests --parallel
+            resource_materialization_tests shader_vertex_metadata_tests archive_file_tests avplayer_file_tests --parallel > build-windows.log 2>&1
+          set BUILD_RESULT=%ERRORLEVEL%
+          type build-windows.log
+          exit /b %BUILD_RESULT%
+
+      - name: Report build errors
+        if: failure() && steps.build.outcome == 'failure'
+        shell: pwsh
+        run: |
+          $log = 'build-windows.log'
+          if (-not (Test-Path $log)) {
+            Write-Output '::error::Windows build produced no log file'
+            exit 0
+          }
+          $lines = Select-String -Path $log -Pattern 'error:|fatal error|error C[0-9]+|error LNK' |
+            Select-Object -First 30
+          if (-not $lines) {
+            $lines = Get-Content $log -Tail 40
+          }
+          foreach ($line in $lines) {
+            $text = ($line.Line ?? $line).Trim() -replace '%', '%25'
+            if ($text.Length -gt 900) {
+              $text = $text.Substring(0, 900)
+            }
+            if ($text.Length -gt 0) {
+              Write-Output "::error::$text"
+            }
+          }
 
       - name: Test
         shell: cmd
