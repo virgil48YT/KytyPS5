@@ -27,6 +27,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <fmt/format.h>
 #include <limits>
 #include <span>
@@ -232,9 +233,7 @@ struct PipelineCache::ProgramCache {
 	struct SourceEntry {
 		SourceEntry(ShaderRecompiler::IR::ResourcePlan plan,
 		            std::unique_ptr<ShaderRecompiler::ShaderSource> call_source)
-		    : call_source(std::move(call_source)), resource_plan(std::move(plan)) {
-			permutations.reserve(8);
-		}
+		    : call_source(std::move(call_source)), resource_plan(std::move(plan)) {}
 
 		std::span<const uint32_t> FunctionCode() const {
 			return call_source
@@ -273,7 +272,7 @@ struct PipelineCache::ProgramCache {
 		ShaderRecompiler::IR::ResourcePlan           resource_plan;
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
-		std::vector<Permutation>                    permutations;
+		std::deque<Permutation>                     permutations;
 		bool                                       skip_dispatch = false;
 	};
 
