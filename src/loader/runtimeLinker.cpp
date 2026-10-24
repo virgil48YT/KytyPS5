@@ -41,8 +41,8 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <tlhelp32.h>
-#include <windows.h>
+#include <windows.h> // IWYU pragma: keep
+#include <tlhelp32.h> // IWYU pragma: keep
 #else
 #if defined(__APPLE__)
 #include <mach/mach.h>
@@ -682,7 +682,8 @@ static std::string DescribeHostCodeAddress(uint64_t addr) {
 	if (GetModuleFileNameA(module, path, MAX_PATH) == 0) {
 		return fmt::format("0x{:016x} <unknown module>", addr);
 	}
-	return fmt::format("0x{:016x} {}+0x{:x}", addr, path, addr - reinterpret_cast<uint64_t>(module));
+	return fmt::format("0x{:016x} {}+0x{:x}", addr, static_cast<const char*>(path),
+	                   addr - reinterpret_cast<uint64_t>(module));
 }
 
 // Host crashes frequently happen inside the Vulkan loader or the ICD, so naming the faulting
@@ -741,7 +742,7 @@ static void ReportHostExceptionModules(const Common::HostException::ExceptionInf
 		for (BOOL ok = Module32FirstA(snapshot, &entry); ok; ok = Module32NextA(snapshot, &entry)) {
 			const auto base = reinterpret_cast<uint64_t>(entry.modBaseAddr);
 			report += fmt::format("\n {:016x}-{:016x} {}", base, base + entry.modBaseSize,
-			                      entry.szExePath);
+			                      static_cast<const char*>(entry.szExePath));
 		}
 		report += "\n";
 		CloseHandle(snapshot);
